@@ -841,6 +841,24 @@ a:hover{color:var(--accent);}
 .hero{justify-content:flex-end;}
 .hero > .hero-grid{margin:0 clamp(1.5rem,5vw,5rem) 0 auto;max-width:480px;width:100%;position:relative;top:clamp(2rem,9.5vh,6rem);}
 @media (max-width:1179px){.hero > .hero-grid{margin-inline:auto;top:0;}}
+
+/* Research projects */
+.project-grid{display:grid;grid-template-columns:1fr;gap:var(--sp-5);}
+.project-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-lg);padding:clamp(1.25rem,3vw,2rem);box-shadow:var(--shadow-sm);}
+.project-topline{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:.75rem;margin-bottom:var(--sp-4);}
+.project-kicker{font-family:var(--font-mono);font-size:.72rem;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);}
+.project-card h3{font-family:var(--font-display);font-size:clamp(1.35rem,1.1rem + 1vw,1.8rem);line-height:1.25;margin:0;color:var(--ink);}
+.project-description{max-width:78ch;color:var(--ink-soft);line-height:1.7;margin-top:var(--sp-3);}
+.project-method{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:var(--sp-4);}
+.project-results{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-3);margin-top:var(--sp-6);}
+.project-result{padding:var(--sp-4);border:1px solid var(--line);border-radius:var(--radius-md);background:var(--surface-2);}
+.project-result strong{display:block;font-family:var(--font-mono);font-size:clamp(1.15rem,1rem + .8vw,1.55rem);color:var(--data);font-variant-numeric:tabular-nums;}
+.project-result span{display:block;margin-top:.25rem;color:var(--muted);font-size:.82rem;line-height:1.45;}
+.project-findings{margin:var(--sp-5) 0 0;padding-left:1.2rem;color:var(--ink-soft);line-height:1.7;}
+.project-findings li+li{margin-top:.45rem;}
+.project-links{display:flex;flex-wrap:wrap;gap:.7rem;margin-top:var(--sp-6);}
+.project-note{font-size:.84rem;color:var(--muted);line-height:1.6;margin-top:var(--sp-5);}
+@media(min-width:700px){.project-results{grid-template-columns:repeat(3,minmax(0,1fr));}}
 </style>
 
 <a class="skip-link" href="#main-content">Skip to content</a>
@@ -864,6 +882,7 @@ a:hover{color:var(--accent);}
     <li><a href="#about" data-sec="about"><span class="tick"></span>About</a></li>
     <li><a href="#journey" data-sec="journey"><span class="tick"></span>Timeline</a></li>
     <li><a href="#research" data-sec="research"><span class="tick"></span>Research</a></li>
+    <li><a href="#research-projects" data-sec="research-projects"><span class="tick"></span>Research Projects</a></li>
     <li><a href="#honors" data-sec="honors"><span class="tick"></span>Honors</a></li>
     <li><a href="#skills" data-sec="skills"><span class="tick"></span>Toolkit</a></li>
     <li><a href="#personal" data-sec="personal"><span class="tick"></span>Off the Clock</a></li>
@@ -876,6 +895,7 @@ a:hover{color:var(--accent);}
   <a href="#about" data-sec="about">About</a>
   <a href="#journey" data-sec="journey">Timeline</a>
   <a href="#research" data-sec="research">Research</a>
+  <a href="#research-projects" data-sec="research-projects">Projects</a>
   <a href="#honors" data-sec="honors">Honors</a>
   <a href="#skills" data-sec="skills">Toolkit</a>
   <a href="#personal" data-sec="personal">Off the Clock</a>
@@ -1217,6 +1237,28 @@ a:hover{color:var(--accent);}
 
     </div>
   </section>
+
+<section id="research-projects" class="section">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Research Projects</p>
+      <h2 class="h2">From question to evidence</h2>
+      <p class="lead">Completed and ongoing applied research, with project summaries and supporting materials.</p>
+    </div>
+    <div class="project-grid">
+      <article class="project-card">
+        <div class="project-topline"><span class="project-kicker">Project 01 · Completed · October 2026</span><span class="badge badge-good">Completed</span></div>
+        <h3>Quantifying the Influence of Socioeconomic and Public Health Predictors on Life Expectancy</h3>
+        <p class="project-description">This study examines how socioeconomic conditions and public health burdens relate to life expectancy across 183 countries in 2015. Multiple linear regression was used to estimate the independent associations of candidate predictors, assess multicollinearity, and select a more parsimonious model through backward stepwise regression.</p>
+        <div class="project-method" aria-label="Project methods and themes"><span class="chip">Multiple linear regression</span><span class="chip">Exploratory data analysis</span><span class="chip">Multicollinearity diagnostics</span><span class="chip">Backward stepwise selection</span><span class="chip">R</span></div>
+        <div class="project-results" aria-label="Key project results"><div class="project-result"><strong>183</strong><span>countries observed in 2015</span></div><div class="project-result"><strong>0.8715</strong><span>adjusted R² for the final model</span></div><div class="project-result"><strong>7</strong><span>predictors retained in the final model</span></div></div>
+        <ul class="project-findings"><li>Average years of schooling had the strongest positive association in the final model: about 0.70 additional years of life expectancy per additional year of schooling, holding the other model variables constant.</li><li>Adult mortality, HIV death rate, early-childhood thinness, polio immunization deficit, and developing-country status were negatively associated with life expectancy; log GDP per capita was positively associated.</li><li>The final model retained schooling, log GDP per capita, adult mortality, log HIV death rate, log early-childhood thinness, log polio immunization deficit, and country status.</li></ul>
+        <p class="project-note">The findings describe adjusted associations in cross-sectional country-level data; they should not be interpreted as causal effects.</p>
+        <div class="project-links"><a class="btn btn-primary" href="LE_Project.pdf" target="_blank" rel="noopener">Read the project report</a><a class="btn btn-ghost" href="Scratch%20Paper.R" download>Scratch Paper.R</a><a class="btn btn-ghost" href="LE%20project2.R" download>LE project2.R</a></div>
+      </article>
+    </div>
+  </div>
+</section>
 
   <!-- ============================================================
        HONORS
