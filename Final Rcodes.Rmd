@@ -1,0 +1,1116 @@
+---
+title: "Statistical Bias Correction of Seoul's LDAPS Weather Forecast"
+subtitle: "STA 6167 — Regression Analysis Project"
+author: "MD Polash Ali"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    fig_caption: true
+    theme: flatly
+    highlight: kate
+    code_folding: show
+    number_sections: true
+---
+
+# Set up
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  warning   = FALSE,
+  message   = FALSE,
+  fig.align = "center",
+  fig.width = 7,
+  fig.height = 4.5,
+  out.width = "90%"
+)
+```
+
+```{r packages}
+library(tidyverse)   # data wrangling, ggplot2
+library(car)         # vif(), influencePlot(), powerTransform()
+library(MASS)        # boxcox()
+library(lmtest)      # bptest(), resettest()
+library(caret)       # createDataPartition()
+library(ggcorrplot)  # correlation heatmap
+library(gridExtra)   # grid.arrange()
+library(knitr)       # kable()
+library(nortest)     # ad.test()
+library(MuMIn) 
+library(sandwich)
+```
+
+
+# Data Loading and Cleaning
+```{r load-data}
+raw <- read.csv("temp.csv", header = TRUE, stringsAsFactors = FALSE)
+colnames(raw) <- trimws(colnames(raw))
+
+cat("Raw dimensions:", dim(raw), "\n")
+cat("Missing values per column:\n")
+print(colSums(is.na(raw)))
+```
+
+```{r clean}
+sol_col <- grep("[Ss]olar", names(raw), value = TRUE)[1]
+
+wx <- raw %>%
+  rename(
+    LDAPS_Tmax    = LDAPS_Tmax_lapse,
+    LDAPS_Tmin    = LDAPS_Tmin_lapse,
+    Solar_rad     = !!sym(sol_col)
+  ) %>%
+  mutate(
+    Date  = as.Date(Date, tryFormats = c("%d-%m-%Y", "%Y-%m-%d", "%m/%d/%Y")),
+    year  = as.integer(format(Date, "%Y")),
+    month = as.integer(format(Date, "%m")),
+    # Elevation tercile grouping
+    elev_class = cut(
+      DEM,
+      breaks = quantile(DEM, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE),
+      labels = c("Low", "Medium", "High"),
+      include.lowest = TRUE
+    ),
+    elev_class    = relevel(factor(elev_class), ref = "Low"),
+    # Response: model bias (positive = cold bias)
+    bias          = Next_Tmax - LDAPS_Tmax,
+    # Aggregate cloud cover and precipitation across 6-hr windows
+    LDAPS_CC_avg  = (LDAPS_CC1  + LDAPS_CC2  + LDAPS_CC3  + LDAPS_CC4)  / 4,
+    LDAPS_PPT_avg = (LDAPS_PPT1 + LDAPS_PPT2 + LDAPS_PPT3 + LDAPS_PPT4) / 4
+  ) %>%
+  drop_na(bias, LDAPS_Tmin, LDAPS_RHmin, LDAPS_RHmax,
+          LDAPS_WS, LDAPS_LH, LDAPS_CC_avg, LDAPS_PPT_avg,
+          Present_Tmax, Present_Tmin, lat, lon, DEM, Slope,
+          Solar_rad, elev_class, station) %>%
+  arrange(station, Date)
+
+# Select analytic variables; convert month to readable factor
+data <- wx %>%
+  dplyr::select(
+    station, Date, month, year, lat, lon,
+    DEM, Slope, Solar_rad, elev_class,
+    bias, Next_Tmax, LDAPS_Tmax,
+    LDAPS_Tmin, LDAPS_RHmin, LDAPS_RHmax,
+    LDAPS_WS, LDAPS_LH, LDAPS_CC_avg, LDAPS_PPT_avg,
+    Present_Tmax, Present_Tmin
+  ) %>%
+  mutate(month = factor(month, labels = c("June","July","August")))
+
+cat("\nClean dimensions:", dim(data), "\n")
+cat("Elevation class distribution:\n")
+print(table(data$elev_class))
+cat("\nMissing values after cleaning:\n")
+print(colSums(is.na(data)))
+```
+
+```{r train-test-split}
+set.seed(42)
+data <- data %>% mutate(strata = paste(year, month, sep = "_"))
+
+train_idx <- createDataPartition(data$strata, p = 0.80, list = FALSE)
+train_raw <- data[ train_idx, ]
+test_raw  <- data[-train_idx, ]
+
+cat("Training set:", nrow(train_raw), "observations\n")
+cat("Test set:    ", nrow(test_raw),  "observations\n\n")
+cat("Year distribution — Training:\n"); print(table(train_raw$year))
+cat("Year distribution — Test:\n");     print(table(test_raw$year))
+```
+
+
+# Benchmark Model
+```{r Uncorrected Model}
+ulm1 = lm(Next_Tmax~LDAPS_Tmax, data=data)
+summary(ulm1)
+sqrt(mean(ulm1$residuals^2))
+mean(data$Next_Tmax-data$LDAPS_Tmax)
+
+p_ulm1 <- ggplot(data, aes(x = LDAPS_Tmax, y = Next_Tmax)) +
+  geom_point(alpha = 0.1, size = 0.8) +
+  geom_smooth(aes(x = LDAPS_Tmax, y = Next_Tmax), method = "lm", se = TRUE,
+              color = "blue", linewidth = 1, inherit.aes = FALSE) +
+  geom_abline(slope = 1, intercept = 0, color = "red", lty = 2, linewidth = 0.5) +
+  labs(title    = "LDAPS forecast v/s Actual maximum temperature",
+       subtitle = "Red = perfect forecast;  Blue = OLS fit",
+       x = "LDAPS_forcasted Maximum Temperatures",
+       y = "Actual Maximum Temperatures") +
+  annotate("text",
+           x = 37, y = 32,
+           label = paste0("E(Bias) = ", round(mean(data$bias), 2), " °C"),
+           hjust = 1, color = "black", size = 2.5) +
+  annotate("text",
+           x = 37, y = 31,
+           label = paste0("R2 = ", 0.69),
+           hjust = 1, color = "black", size = 2.5) +
+  annotate("text",
+           x = 37, y = 30,
+           label = paste0("RMSE = ", 1.71),
+           hjust = 1, color = "black", size = 2.5) +
+  
+  theme_bw()
+p_ulm1
+
+```
+
+
+# EDA
+```{r eda-bias-dist, fig.cap="Distribution of LDAPS model bias."}
+cat("Overall bias statistics:\n")
+cat("  Mean =", round(mean(data$bias), 4), " | SD =", round(sd(data$bias), 4), "\n")
+print(summary(data$bias))
+
+ggplot(data, aes(x = bias)) +
+  geom_histogram(bins = 40, fill = "#D85A30", color = "white", alpha = 0.85) +
+  geom_vline(xintercept = 0,              color = "black", linetype = "dashed", linewidth = 0.9) +
+  geom_vline(xintercept = mean(data$bias), color = "#378ADD", linetype = "solid", linewidth = 1) +
+  annotate("text",
+           x = mean(data$bias) + 3.8, y = 700,
+           label = paste0("Mean = ", round(mean(data$bias), 2), " °C"),
+           hjust = 1, color = "#378ADD", size = 3.8) +
+  labs(
+    title    = "Distribution of LDAPS Model Bias",
+    subtitle = "Bias = Actual maximum temperature - LDAPS forecasted Temperature",
+    x = "Bias (°C)", y = "Count"
+  ) +
+  theme_bw()
+```
+
+```{r eda-bias-groups, fig.cap="Bias by elevation class (left) and by month (right). High-elevation stations have a systematically larger bias.", fig.width=10}
+tbl_elev <- data %>%
+  group_by(elev_class) %>%
+  summarise(n = n(), Mean = round(mean(bias),3),
+            SD = round(sd(bias),3), Median = round(median(bias),3), .groups="drop")
+kable(tbl_elev, caption = "Bias summary by elevation class")
+
+tbl_mo <- data %>%
+  group_by(Month = month) %>%
+  summarise(n = n(), Mean = round(mean(bias),3),
+            SD = round(sd(bias),3), Median = round(median(bias),3), .groups="drop")
+kable(tbl_mo, caption = "Bias summary by month")
+
+p_elev <- ggplot(data, aes(x = elev_class, y = bias, fill = elev_class)) +
+  geom_boxplot(alpha = 0.85, outlier.size = 0.4, show.legend = FALSE) +
+  geom_hline(yintercept = 0, color = "red", lty = 2, linewidth = 0.8) +
+  scale_fill_manual(values = c(Low="#5ab4ac", Medium="#f5c518", High="#d94f3d")) +
+  labs(title = "Bias by Elevation Class", x = "Elevation class", y = "Bias (°C)") +
+  theme_classic()
+
+p_mo <- ggplot(data, aes(x = month, y = bias, fill = month)) +
+  geom_boxplot(alpha = 0.7, outlier.size = 0.4, show.legend = FALSE) +
+  geom_hline(yintercept = 0, color = "red", lty = 2, linewidth = 0.8) +
+  scale_fill_manual(values = c(June="#5ab4ac", July="#f5c518", August="#d94f3d")) +
+  labs(title = "Bias by Month", x = "Month", y = "Bias (°C)") +
+  theme_classic()
+
+grid.arrange(p_elev, p_mo, ncol = 2)
+```
+
+```{r eda-bias-year, fig.cap="Mean model bias by year and elevation class. The dashed line marks zero bias (perfect forecast). Bias varies across years indicating inter-annual non-stationarity."}
+data %>%
+  group_by(year, elev_class) %>%
+  summarise(mean_bias = mean(bias), .groups = "drop") %>%
+  ggplot(aes(x = year, y = mean_bias, color = elev_class, group = elev_class)) +
+  geom_line(linewidth = 1) + geom_point(size = 3) +
+  geom_hline(yintercept = 0, lty = 2, linewidth = 0.6) +
+  scale_color_manual(values = c(Low="#378ADD", Medium="#1D9E75", High="#D85A30"),
+                     name = "Elevation class") +
+  scale_x_continuous(breaks = 2013:2017) +
+  labs(title = "Mean Bias by Year and Elevation Class",
+       x = "Year", y = "Mean Bias (°C)") +
+  theme_bw()
+```
+
+```{r eda-corr, fig.cap="Correlation heatmap"}
+data %>%
+  dplyr::select(bias, LDAPS_Tmin, LDAPS_RHmin, LDAPS_RHmax,
+                LDAPS_WS, LDAPS_LH, LDAPS_CC_avg, LDAPS_PPT_avg,
+                Present_Tmax, Present_Tmin, Solar_rad) %>%
+  cor(use = "complete.obs") %>%
+  ggcorrplot(method = "square", lab = TRUE, lab_size = 2.5,
+             colors = c("#D85A30", "white", "#378ADD"),
+             tl.cex = 9, title = "Predictor correlation matrix")
+```
+
+
+# Hypothesis Testing:
+```{r anova-elev,}
+aov_elev <- aov(bias ~ elev_class, data = data)
+cat("One-way ANOVA: bias ~ elev_class\n")
+print(summary(aov_elev))
+
+cat("\nTukey HSD post-hoc test:\n")
+print(TukeyHSD(aov_elev))
+
+cat("\nBartlett test (variance homogeneity):\n")
+print(bartlett.test(bias ~ elev_class, data = data))
+```
+**Interpretation:** The significant ANOVA F-test (p < 0.001) confirms that mean bias differs across elevation classes. The Bartlett test additionally reveals *unequal variances* across groups — a key motivation for Weighted Least Squares (WLS) regression. The Tukey HSD post-hoc test identifies which specific pairs of elevation classes differ significantly.
+
+```{r anova-month}
+aov_month <- aov(bias ~ month, data = data)
+cat("One-way ANOVA: bias ~ month\n")
+print(summary(aov_month))
+
+cat("\nTukey HSD post-hoc test:\n")
+print(TukeyHSD(aov_month))
+
+cat("\nBartlett test (variance homogeneity):\n")
+print(bartlett.test(bias ~ month, data = data))
+```
+**Interpretation:** Month is also a significant predictor of bias, with variance heterogeneity across months further supporting WLS.
+
+
+# Response variable transformation checking
+Since `bias` contains negative values, standard Box-Cox cannot be applied directly. We evaluate two approaches:
+1. **Yeo-Johnson transformation** (handles negative values natively)
+2. **Shifted Box-Cox** (shift bias to be strictly positive, then apply Box-Cox)
+
+```{r transformation, fig.cap="Box-Cox profile likelihood for the shifted bias response. The 95% confidence interval (dashed lines) includes λ = 1, indicating no transformation is needed."}
+# Option 1: Yeo-Johnson
+cat("Yeo-Johnson power transformation test (λ = 1 → no transformation needed):\n")
+powerTransform(
+  bias ~ LDAPS_Tmin + LDAPS_RHmin + LDAPS_RHmax + month +
+    LDAPS_WS + LDAPS_LH + LDAPS_CC_avg + LDAPS_PPT_avg +
+    Present_Tmax + Present_Tmin + Solar_rad + elev_class + Slope,
+  data = train_raw, family = "yjPower"
+)
+
+# Option 2: Shifted Box-Cox
+train_raw_shift <- train_raw %>% mutate(bias_shifted = bias + abs(min(bias)) + 1)
+
+mlr_bc <- lm(
+  bias_shifted ~ LDAPS_Tmin + LDAPS_RHmin + LDAPS_RHmax + month +
+    LDAPS_WS + LDAPS_LH + LDAPS_CC_avg + LDAPS_PPT_avg +
+    Present_Tmax + Present_Tmin + Solar_rad + elev_class + Slope,
+  data = train_raw_shift
+)
+bc       <- boxcox(mlr_bc, lambda = seq(-0.5, 3, length.out = 200), plotit = TRUE)
+lam_opt  <- bc$x[which.max(bc$y)]
+lam_ci   <- bc$x[bc$y > max(bc$y) - qchisq(0.95, 1) / 2]
+
+cat("Optimal λ (shifted Box-Cox):", round(lam_opt, 3), "\n")
+cat("95% CI: [", round(min(lam_ci),3), ",", round(max(lam_ci),3), "]\n")
+```
+**Conclusion:** Both approaches yield λ ≈ 1, confirming that no transformation of the response is needed. We proceed with raw `bias` as the response variable.
+
+
+# Model Building
+## Full Multiple Linear Regression
+We fit a full MLR using all scientifically relevant predictors.
+```{r full-mlr}
+full_mlr <- lm(
+  bias ~ LDAPS_Tmin + LDAPS_RHmin + LDAPS_RHmax + LDAPS_WS + LDAPS_LH + LDAPS_CC_avg + LDAPS_PPT_avg +
+         Present_Tmax + Present_Tmin + Solar_rad + Slope + elev_class+ month,
+  data = train_raw
+)
+cat("Full MLR summary:\n")
+print(summary(full_mlr))
+plot(full_mlr)
+
+cat("Anderson-Darling normality test:\n")
+print(ad.test(residuals(full_mlr)))
+
+cat("\nBreusch-Pagan heteroscedasticity test:\n")
+print(bptest(full_mlr))
+
+cat("\nRESET misspecification test:\n")
+print(resettest(full_mlr))
+```
+
+## Quadratic Model and Interaction terms
+```{r}
+#  PHASE 1: VISUAL DIAGNOSTICS FOR NON-LINEARITY; Goal: Eye-ball which continuous predictors bend
+## 1a) Ramsey RESET test (model misspecification test); H0 = no omitted non-linearities in the model.
+cat("\n=== Ramsey RESET Test ===\n")
+reset_result <- lmtest::resettest(full_mlr, power = 2:3, type = "fitted")
+print(reset_result)
+if (reset_result$p.value < 0.05) {
+  cat("  ↳ RESET significant: non-linearity likely present.\n")
+} else {
+  cat("  ↳ RESET not significant: no strong evidence of mis-specification.\n")
+}
+
+##1b. Scatter plots: bias vs each continuous predictor with loess 
+cat("\n=== Saving scatter plots with loess curves ===\n")
+pdf("scatter_loess.pdf", width = 14, height = 10)
+cont_vars <- c(
+  "LDAPS_Tmin", "LDAPS_RHmin", "LDAPS_RHmax", "LDAPS_WS",
+  "LDAPS_LH", "LDAPS_CC_avg", "LDAPS_PPT_avg",
+  "Present_Tmax", "Present_Tmin", "Solar_rad", "Slope"
+)
+par(mfrow = c(3, 4))
+for (v in cont_vars) {
+  x_vals <- train_raw[[v]]
+  plot(x_vals, train_raw$bias,
+       xlab = v, ylab = "bias",
+       pch  = 16, cex = 0.3, col = "#44444455",
+       main = paste("bias ~", v))
+  lo <- loess(train_raw$bias ~ x_vals, span = 0.5)
+  ord <- order(x_vals)
+  lines(x_vals[ord], fitted(lo)[ord], col = "red", lwd = 2)
+  abline(lm(train_raw$bias ~ x_vals), col = "blue", lty = 2)
+  legend("topright", c("loess", "linear"), col = c("red","blue"),
+         lty = c(1,2), lwd = 2, cex = 0.7, bty = "n")
+}
+dev.off()
+cat("  → scatter_loess.pdf saved\n")
+
+
+#  PHASE 2: FORMAL TESTING OF INDIVIDUAL QUADRATIC TERMS; Goal: For each predictor, compare linear vs +I(x^2) by F-test & AIC
+cat("\n\n=== PHASE 2: Individual Quadratic Term Tests ===\n")
+cat(sprintf("%-20s  %8s  %8s  %8s  %7s  %s\n",
+            "Variable", "F-stat", "p-value", "AIC(lin)",
+            "AIC(quad)", "Evidence"))
+cat(strrep("-", 72), "\n")
+
+quad_results <- data.frame()
+for (v in cont_vars) {
+
+  # Base formula (full MLR)
+  f_linear <- as.formula(
+    paste("bias ~ LDAPS_Tmin + LDAPS_RHmin + LDAPS_RHmax + LDAPS_WS +",
+          "LDAPS_LH + LDAPS_CC_avg + LDAPS_PPT_avg + Present_Tmax +",
+          "Present_Tmin + Solar_rad + Slope + elev_class + month")
+  )
+
+  # Quadratic formula: adds I(v^2)
+  f_quad <- update(f_linear, paste(". ~ . + I(", v, "^2)"))
+
+  m_linear <- lm(f_linear, data = train_raw)
+  m_quad   <- lm(f_quad,   data = train_raw)
+
+  ft      <- anova(m_linear, m_quad)
+  f_stat  <- ft$F[2]
+  p_val   <- ft$`Pr(>F)`[2]
+  aic_lin <- AIC(m_linear)
+  aic_q   <- AIC(m_quad)
+  delta   <- aic_lin - aic_q   # positive = quad is better
+
+  evidence <- if (p_val < 0.001 & delta > 4) "STRONG ✓✓" else
+              if (p_val < 0.05  & delta > 2) "moderate ✓" else
+              if (p_val < 0.10)              "marginal ."  else
+              "none"
+
+  cat(sprintf("%-20s  %8.3f  %8.4f  %8.1f  %7.1f  %s\n",
+              v, f_stat, p_val, aic_lin, aic_q, evidence))
+
+  quad_results <- rbind(quad_results, data.frame(
+    variable  = v,
+    F_stat    = round(f_stat, 3),
+    p_value   = round(p_val,  5),
+    AIC_linear = round(aic_lin, 1),
+    AIC_quad   = round(aic_q,   1),
+    delta_AIC  = round(delta,   2),
+    evidence  = evidence
+  ))
+}
+cat("\n=== Summary: Variables Worth Including as Quadratic ===\n")
+sig_quads <- quad_results %>%
+  filter(p_value < 0.05) %>%
+  arrange(p_value)
+
+print(sig_quads)
+sig_quad_vars <- sig_quads$variable
+cat("\nVariables with significant quadratic terms:", paste(sig_quad_vars, collapse = ", "), "\n")
+
+
+#  PHASE 3: BUILD THE QUADRATIC MODEL;  Adds I(x^2) only for variables identified in Phase 2
+cat("\n\n=== PHASE 3: Full Quadratic Model ===\n")
+
+if (length(sig_quad_vars) > 0) {
+
+  quad_terms <- paste("I(", sig_quad_vars, "^2)", collapse = " + ")
+  f_full_quad <- as.formula(
+    paste(
+      "bias ~ LDAPS_Tmin + LDAPS_RHmin + LDAPS_RHmax + LDAPS_WS + LDAPS_LH +",
+      "LDAPS_CC_avg + LDAPS_PPT_avg + Present_Tmax + Present_Tmin +",
+      "Solar_rad + Slope + elev_class + month +",
+      quad_terms
+    )
+  )
+
+  mlr_quad <- lm(f_full_quad, data = train_raw)
+  cat("Full Quadratic Model Summary:\n")
+  print(summary(mlr_quad))
+
+  cat("\n=== Linear vs Quadratic Model Comparison ===\n")
+  print(anova(full_mlr, mlr_quad))
+  cat(sprintf("AIC (linear): %.2f\nAIC (quadratic): %.2f\nΔAIC: %.2f\n",
+              AIC(full_mlr), AIC(mlr_quad),
+              AIC(full_mlr) - AIC(mlr_quad)))
+
+} else {
+  cat("No significant quadratic terms found.\n")
+  mlr_quad <- full_mlr
+}
+
+
+#  PHASE 4: INTERACTION TERM EXPLORATION; Strategy: Start with theoretically motivated pairs, then use all-pairs AIC screening.
+cat("\n\n=== PHASE 4: Interaction Term Exploration ===\n")
+# 4a. Theoretically motivated interactions; Based on the model: meteorological variables likely interact with each other and with present conditions. A few high-priority pairs:
+theory_pairs <- list(
+  c("LDAPS_Tmin",    "Present_Tmax"),   # model vs obs temperature
+  c("LDAPS_RHmin",   "LDAPS_RHmax"),    # RH spread
+  c("LDAPS_CC_avg",  "Solar_rad"),      # cloud cover vs radiation
+  c("LDAPS_WS",      "LDAPS_LH"),       # wind × latent heat
+  c("LDAPS_RHmin",   "LDAPS_LH"),       # humidity × latent heat
+  c("LDAPS_Tmin",    "Solar_rad"),      # temperature × radiation
+  c("Present_Tmax",  "Solar_rad"),      # observed temp × radiation
+  c("LDAPS_PPT_avg", "LDAPS_CC_avg"),   # precip × cloud
+  c("LDAPS_RHmax",   "LDAPS_CC_avg"),   # humidity × cloud
+  c("elev_class",    "LDAPS_Tmin"),     # elevation × temperature
+  c("elev_class",    "Solar_rad"),      # elevation × radiation
+  c("month",         "LDAPS_CC_avg"),   # seasonal × cloud
+  c("month",         "Solar_rad")       # seasonal × radiation
+)
+
+cat(sprintf("\n%-35s  %8s  %8s  %7s  %s\n",
+            "Interaction", "F-stat", "p-value", "ΔAIC", "Evidence"))
+cat(strrep("-", 75), "\n")
+int_results <- data.frame()
+base_model  <- mlr_quad
+for (pair in theory_pairs) {
+  v1 <- pair[1]; v2 <- pair[2]
+  term_str <- paste(v1, v2, sep = ":")
+
+  f_int <- update(formula(base_model), paste(". ~ . +", v1, "*", v2))
+
+  tryCatch({
+    m_int  <- lm(f_int, data = train_raw)
+    ft     <- anova(base_model, m_int)
+    f_stat <- ft$F[2]
+    p_val  <- ft$`Pr(>F)`[2]
+    delta  <- AIC(base_model) - AIC(m_int)
+
+    evidence <- if (p_val < 0.001 & delta > 4) "STRONG ✓✓" else
+                if (p_val < 0.05  & delta > 2) "moderate ✓" else
+                if (p_val < 0.10)              "marginal ."  else
+                "none"
+
+    cat(sprintf("%-35s  %8.3f  %8.4f  %7.2f  %s\n",
+                term_str, f_stat, p_val, delta, evidence))
+
+    int_results <- rbind(int_results, data.frame(
+      interaction = term_str,
+      F_stat      = round(f_stat, 3),
+      p_value     = round(p_val,  5),
+      delta_AIC   = round(delta,  2),
+      evidence    = evidence
+    ))
+  }, error = function(e) {
+    cat(sprintf("%-35s  [error: %s]\n", term_str, conditionMessage(e)))
+  })
+}
+cat("\n=== Significant Interactions Summary ===\n")
+sig_ints <- int_results %>%
+  filter(p_value < 0.05) %>%
+  arrange(p_value, desc(delta_AIC))
+print(sig_ints)
+
+# 4b. Automated all-pairs AIC screening; WARNING: With 11 continuous vars + 2 factors = 13 terms → 78 pairs.
+cat("\n\n=== 4b. All-Pairs Interaction AIC Screening ===\n")
+cat("Fitting all pairwise interactions...\n")
+
+all_terms  <- c(cont_vars, "elev_class", "month")
+all_pairs  <- combn(all_terms, 2, simplify = FALSE)
+aic_screen <- data.frame()
+
+for (pair in all_pairs) {
+  v1 <- pair[1]; v2 <- pair[2]
+  f_int <- tryCatch(
+    update(formula(base_model), paste(". ~ . +", v1, "*", v2)),
+    error = function(e) NULL
+  )
+  if (is.null(f_int)) next
+
+  m_int <- tryCatch(lm(f_int, data = train_raw), error = function(e) NULL)
+  if (is.null(m_int)) next
+
+  p_val <- tryCatch({
+    ft <- anova(base_model, m_int)
+    ft$`Pr(>F)`[2]
+  }, error = function(e) NA)
+
+  delta <- AIC(base_model) - AIC(m_int)
+
+  aic_screen <- rbind(aic_screen, data.frame(
+    v1 = v1, v2 = v2,
+    interaction = paste(v1, v2, sep = ":"),
+    p_value     = round(p_val, 5),
+    delta_AIC   = round(delta, 2)
+  ))
+}
+# Statistically most significant ones only
+sig_screen <- aic_screen %>%
+  filter(p_value < 0.05 & delta_AIC > 2) %>%
+  arrange(desc(delta_AIC))
+# Statistically significant ones only
+sig_screen <- aic_screen %>%
+  filter(p_value < 0.05 & delta_AIC > 2) %>%
+  arrange(desc(delta_AIC))
+cat("\nStatistically significant interactions (p<0.05, ΔAIC>2):\n")
+print(sig_screen) 
+## So, Slope:elev_class has the most significant interaction effect. So we will add only that term as the interaction term. 
+
+
+#  PHASE 5: FINAL MODEL WITH QUADRATICS + INTERACTIONS
+mlr_final = lm(bias ~ LDAPS_Tmin + LDAPS_RHmin + LDAPS_RHmax + LDAPS_WS + LDAPS_LH + 
+    LDAPS_CC_avg + LDAPS_PPT_avg + Present_Tmax + Present_Tmin + 
+    Solar_rad + Slope + elev_class + month + I(LDAPS_RHmax^2) + 
+    I(LDAPS_PPT_avg^2) + I(Solar_rad^2) + I(Slope^2) + I(Present_Tmax^2) + 
+    I(LDAPS_RHmin^2) + I(LDAPS_CC_avg^2) + I(LDAPS_LH^2) + I(Present_Tmin^2) + 
+    Slope*elev_class, data=train_raw)
+cat("\nFinal Model Summary:\n")
+print(summary(mlr_final))
+
+cat("\n=== Model Progression Comparison ===\n")
+  models <- list(
+    "1. Full MLR (linear)"    = full_mlr,
+    "2. + Quadratic terms"    = mlr_quad,
+    "3. + Interaction terms"  = mlr_final )
+
+comparison <- data.frame(
+    Model     = names(models),
+    R_sq      = sapply(models, function(m) round(summary(m)$r.squared,      4)),
+    Adj_R_sq  = sapply(models, function(m) round(summary(m)$adj.r.squared,  4)),
+    RSE       = sapply(models, function(m) round(summary(m)$sigma,          4)),
+    AIC       = sapply(models, function(m) round(AIC(m),                    2)),
+    BIC       = sapply(models, function(m) round(BIC(m),                    2)),
+    n_params  = sapply(models, function(m) length(coef(m)))
+  )
+print(comparison, row.names = FALSE)
+
+
+#  PHASE 6: DIAGNOSTICS ON FINAL MODEL
+cat("\n\n=== PHASE 6: Diagnostics on Final Model ===\n")
+## VIF (multicollinearity check)
+cat("\nVariance Inflation Factors (VIF):\n")
+vif_vals <- tryCatch(car::vif(mlr_final), error = function(e) {
+  cat("  Note: VIF failed (likely due to factor terms), using GVIF.\n")
+  car::vif(mlr_final, type = "predictor")
+})
+print(round(vif_vals, 2))
+cat("  Note: VIF > 10 signals multicollinearity (expected for quad/interaction terms).\n")
+  
+```
+
+## Step wise
+```{r stepwise}
+null_mod  <- lm(bias ~ 1, data = data)
+step_fwd  <- step(null_mod,  scope=list(lower=null_mod, upper=mlr_final),
+                  direction="forward",  trace=0)
+step_bwd  <- step(mlr_final, direction="backward", trace=0)
+step_both <- step(null_mod,  scope=list(lower=null_mod, upper=mlr_final),
+                  direction="both",    trace=0)
+
+comp <- data.frame(
+  Method = c("Forward","Backward","Both"),
+  AIC    = round(c(AIC(step_fwd), AIC(step_bwd), AIC(step_both)), 2),
+  BIC    = round(c(BIC(step_fwd), BIC(step_bwd), BIC(step_both)), 2),
+  Adj_R2 = round(c(summary(step_fwd)$adj.r.squared,
+                   summary(step_bwd)$adj.r.squared,
+                   summary(step_both)$adj.r.squared), 4)
+)
+kable(comp, caption = "Stepwise selection comparison (AIC, BIC, Adjusted R²)")
+
+cat("\nSelected model (backward stepwise):\n")
+print(summary(step_both))
+vif(step_both)
+```
+
+## WLS
+```{r}
+## center data creation:
+mu_train <- train_raw %>% summarise(
+    mu_PTmax   = mean(Present_Tmax),
+    mu_PPT_avg = mean(LDAPS_PPT_avg),
+    mu_solar   = mean(Solar_rad),
+    mu_RHmin   = mean(LDAPS_RHmin),
+    mu_slope   = mean(Slope),
+    mu_LH      = mean(LDAPS_LH),
+    mu_PTmin   = mean(Present_Tmin),
+    mu_CC_avg  = mean(LDAPS_CC_avg),
+    mu_RHmax   = mean(LDAPS_RHmax)
+  )
+center_with <- function(df, mu) {
+  df %>% mutate(
+    Present_TmaxC  = Present_Tmax  - mu$mu_PTmax,
+    LDAPS_PPT_avgC = LDAPS_PPT_avg - mu$mu_PPT_avg,
+    Solar_radC     = Solar_rad     - mu$mu_solar,
+    LDAPS_RHminC   = LDAPS_RHmin   - mu$mu_RHmin,
+    SlopeC         = Slope         - mu$mu_slope,
+    LDAPS_LHC      = LDAPS_LH      - mu$mu_LH,
+    Present_TminC  = Present_Tmin  - mu$mu_PTmin,
+    LDAPS_CC_avgC  = LDAPS_CC_avg  - mu$mu_CC_avg,
+    LDAPS_RHmaxC   = LDAPS_RHmax   - mu$mu_RHmax)
+}
+trainC <- center_with(train_raw, mu_train)
+## Fit OLS to compute weights:
+bias_formula <- bias ~ LDAPS_Tmin + LDAPS_RHminC + LDAPS_RHmaxC + 
+    LDAPS_WS + LDAPS_LHC + LDAPS_CC_avgC + LDAPS_PPT_avgC + Present_TmaxC + 
+    Present_TminC + Solar_radC + SlopeC + elev_class + month + I(LDAPS_RHmaxC^2) + 
+    I(LDAPS_PPT_avgC^2) + I(Solar_radC^2) + I(SlopeC^2) + I(Present_TmaxC^2) + 
+    I(LDAPS_RHminC^2) + I(LDAPS_CC_avgC^2) + I(LDAPS_LHC^2) + I(Present_TminC^2) + 
+    SlopeC * elev_class
+fitC <- lm(bias_formula, data = trainC)
+fit_varC <- lm(update(bias_formula, log(residuals(fitC)^2) ~ .),
+               data = trainC)
+wC      <- 1 / exp(fitted(fit_varC))
+wls_final <- lm(bias_formula, data = trainC, weights = wC)
+cat("=== Final Model: wls_final ===\n")
+print(summary(wls_final))
+
+cat("VIF(wls_final):\n")
+print(vif(wls_final))
+```
+**Interpretation:** Centering dramatically reduces VIF for polynomial terms, confirming that the algebraic collinearity between x and x² — not structural multicollinearity — was the problem.
+
+
+## Diagnostic of wls_final model (Overall final model)
+```{r}
+# ============================================================
+# 1. WEIGHTED RESIDUAL EXTRACTION
+# ============================================================
+# For WLS, diagnostics use *weighted* (Pearson) residuals,
+# not raw residuals.
+
+raw_res      <- residuals(wls_final, type = "response")   # raw
+wtd_res      <- residuals(wls_final, type = "pearson")    # weighted (sqrt(w) * raw)
+std_res      <- rstandard(wls_final)                       # internally studentised
+stu_res      <- rstudent(wls_final)                        # externally studentised
+fitted_vals  <- fitted(wls_final)
+weights_used <- weights(wls_final)
+leverage     <- hatvalues(wls_final)
+cooks_d      <- cooks.distance(wls_final)
+
+diag_df <- data.frame(
+  fitted    = fitted_vals,
+  raw_res   = raw_res,
+  wtd_res   = wtd_res,
+  std_res   = std_res,
+  stu_res   = stu_res,
+  leverage  = leverage,
+  cooks_d   = cooks_d,
+  weights   = weights_used,
+  obs_index = seq_along(fitted_vals)
+)
+
+n <- nrow(diag_df)
+p <- length(coef(wls_final))     # number of parameters
+
+# ============================================================
+# 2. DIAGNOSTIC PLOTS  (3 × 3 panel)
+# ============================================================
+
+# ── 2a. Weighted Residuals vs Fitted ─────────────────────────
+p1 <- ggplot(diag_df, aes(fitted, wtd_res)) +
+  geom_point(alpha = 0.3, size = 0.8) +
+  geom_hline(yintercept = 0, colour = "red", linewidth = 0.7) +
+  geom_smooth(method = "loess", se = FALSE, colour = "steelblue",
+              linewidth = 0.9, span = 0.4) +
+  labs(title = "Weighted Residuals vs Fitted",
+       x = "Fitted values", y = "Pearson (weighted) residuals") +
+  theme_bw()
+
+# ── 2b. Scale–Location (spread should be flat) ───────────────
+p2 <- ggplot(diag_df, aes(fitted, sqrt(abs(std_res)))) +
+  geom_point(alpha = 0.3, size = 0.8) +
+  geom_smooth(method = "loess", se = FALSE, colour = "steelblue",
+              linewidth = 0.9, span = 0.4) +
+  labs(title = "Scale–Location",
+       x = "Fitted values", y = expression(sqrt("|Std. residuals|"))) +
+  theme_bw()
+
+# ── 2c. Normal Q-Q of Externally Studentised Residuals ───────
+p3 <- ggplot(diag_df, aes(sample = stu_res)) +
+  stat_qq(alpha = 0.3, size = 0.8) +
+  stat_qq_line(colour = "red", linewidth = 0.7) +
+  labs(title = "Normal Q-Q (Ext. Studentised Residuals)",
+       x = "Theoretical quantiles", y = "Sample quantiles") +
+  theme_bw()
+
+# ── 2d. Leverage vs Std. Residuals (Bubble = Cook's D) ───────
+lev_thresh  <- 2 * p / n          # rule-of-thumb leverage cutoff
+cook_thresh <- 4 / n               # rule-of-thumb Cook's D cutoff
+
+p4 <- ggplot(diag_df, aes(leverage, std_res)) +
+  geom_point(aes(size = cooks_d), alpha = 0.4) +
+  geom_hline(yintercept = c(-3, 0, 3), linetype = c("dashed","solid","dashed"),
+             colour = "red", linewidth = 0.6) +
+  geom_vline(xintercept = lev_thresh, linetype = "dashed",
+             colour = "orange", linewidth = 0.6) +
+  scale_size_continuous(range = c(0.5, 6), name = "Cook's D") +
+  labs(title = "Leverage vs Std. Residuals",
+       subtitle = sprintf("Leverage cutoff = %.3f  |  Cook's D cutoff = %.4f",
+                          lev_thresh, cook_thresh),
+       x = "Leverage (hat value)", y = "Standardised residuals") +
+  theme_bw()
+
+# ── 2e. Cook's Distance Index Plot ───────────────────────────
+top_cook <- diag_df[diag_df$cooks_d > cook_thresh, ]
+
+p5 <- ggplot(diag_df, aes(obs_index, cooks_d)) +
+  geom_segment(aes(xend = obs_index, yend = 0), alpha = 0.3, linewidth = 0.3) +
+  geom_hline(yintercept = cook_thresh, colour = "red",
+             linetype = "dashed", linewidth = 0.7) +
+  geom_point(data = top_cook, colour = "red", size = 1.5) +
+  labs(title = "Cook's Distance",
+       subtitle = sprintf("%d observations above cutoff (4/n = %.4f)",
+                          nrow(top_cook), cook_thresh),
+       x = "Observation index", y = "Cook's D") +
+  theme_bw()
+
+# ── 2f. Weights vs Raw Residuals  ─────────────────────────────
+# Good WLS: high-weight obs should have small raw residuals
+p6 <- ggplot(diag_df, aes(weights, raw_res)) +
+  geom_point(alpha = 0.3, size = 0.8) +
+  geom_hline(yintercept = 0, colour = "red", linewidth = 0.7) +
+  geom_smooth(method = "loess", se = FALSE, colour = "steelblue",
+              linewidth = 0.9, span = 0.4) +
+  labs(title = "Weights vs Raw Residuals",
+       subtitle = "High-weight obs should cluster near zero",
+       x = "Weight", y = "Raw residuals") +
+  theme_bw()
+
+# ── Print main panel ──────────────────────────────────────────
+grid.arrange(p1, p2, p3, p4, p5, p6, ncol = 2,
+             top = "WLS Model Diagnostics – Main Panel")
+
+# ── 2g. Residuals vs Each Continuous Predictor ───────────────
+# Helper – plot wtd residual against any numeric predictor
+plot_resid_vs_pred <- function(var_name) {
+  ggplot(trainC, aes(x = .data[[var_name]], y = diag_df$wtd_res)) +
+    geom_point(alpha = 0.25, size = 0.7) +
+    geom_hline(yintercept = 0, colour = "red", linewidth = 0.6) +
+    geom_smooth(method = "loess", se = FALSE, colour = "steelblue",
+                linewidth = 0.8, span = 0.5) +
+    labs(title = paste("Wtd Res vs", var_name),
+         x = var_name, y = "Pearson residuals") +
+    theme_bw()
+}
+
+continuous_preds <- c("LDAPS_Tmin", "LDAPS_RHminC", "LDAPS_RHmaxC",
+                      "LDAPS_WS", "LDAPS_LHC", "LDAPS_CC_avgC",
+                      "LDAPS_PPT_avgC", "Present_TmaxC", "Present_TminC",
+                      "Solar_radC", "SlopeC")
+
+pred_plots <- lapply(continuous_preds, plot_resid_vs_pred)
+
+# ── 2h. Residuals by Factor Levels ────────────────────────────
+p_month <- ggplot(trainC, aes(x = month, y = diag_df$wtd_res)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.5, outlier.size = 0.7) +
+  geom_hline(yintercept = 0, colour = "red", linewidth = 0.7) +
+  labs(title = "Wtd Residuals by Month",
+       x = "Month", y = "Pearson residuals") +
+  theme_bw()
+
+p_elev <- ggplot(trainC, aes(x = elev_class, y = diag_df$wtd_res)) +
+  geom_boxplot(fill = "darkorange", alpha = 0.5, outlier.size = 0.7) +
+  geom_hline(yintercept = 0, colour = "red", linewidth = 0.7) +
+  labs(title = "Wtd Residuals by Elevation Class",
+       x = "elev_class", y = "Pearson residuals") +
+  theme_bw()
+
+# Predictor-level plots (4 per row)
+grid.arrange(grobs = pred_plots, ncol = 4,
+             top = "Weighted Residuals vs Each Continuous Predictor")
+
+grid.arrange(p_month, p_elev, ncol = 2,
+             top = "Weighted Residuals by Factor Levels")
+
+# ============================================================
+# 3. FORMAL STATISTICAL TESTS
+# ============================================================
+cat("\n========================================================\n")
+cat("  FORMAL DIAGNOSTIC TESTS\n")
+cat("========================================================\n")
+
+# ── 3a. Normality of weighted residuals ──────────────────────
+cat("\n--- Normality (on Pearson/weighted residuals) ---\n")
+
+# Shapiro-Wilk limited to 5000 obs; use a random subsample if needed
+set.seed(42)
+sw_idx <- if (n > 5000) sample(n, 5000) else seq_len(n)
+sw     <- shapiro.test(wtd_res[sw_idx])
+ad     <- ad.test(wtd_res)          # Anderson-Darling (nortest)
+cat(sprintf("  Shapiro-Wilk  (n=%d subsample): W = %.4f,  p = %.4e\n",
+            length(sw_idx), sw$statistic, sw$p.value))
+cat(sprintf("  Anderson-Darling: A = %.4f,  p = %.4e\n",
+            ad$statistic, ad$p.value))
+
+# ── 3b. Heteroscedasticity ────────────────────────────────────
+# For WLS the *weighted* model should have constant variance;
+# test on unweighted raw residuals to check weight specification
+cat("\n--- Heteroscedasticity ---\n")
+
+bp_wtd <- bptest(wls_final)                          # Breusch-Pagan (WLS)
+bp_raw <- bptest(lm(bias_formula, data = trainC))    # compare with OLS
+cat(sprintf("  Breusch-Pagan (WLS model): BP = %.3f, df = %d, p = %.4e\n",
+            bp_wtd$statistic, bp_wtd$parameter, bp_wtd$p.value))
+cat(sprintf("  Breusch-Pagan (OLS model): BP = %.3f, df = %d, p = %.4e\n",
+            bp_raw$statistic, bp_raw$parameter, bp_raw$p.value))
+
+
+# ── 3d. Multicollinearity ─────────────────────────────────────
+cat("\n--- Multicollinearity (Variance Inflation Factors) ---\n")
+vif_vals <- vif(wls_final)
+print(round(vif_vals, 2))
+high_vif <- vif_vals[vif_vals > 10]
+if (length(high_vif) > 0) {
+  cat("  ⚠  VIF > 10 detected for:", paste(names(high_vif), collapse = ", "), "\n")
+} else {
+  cat("  ✓  No VIF > 10 detected.\n")
+}
+
+# ── 3e. Influential observations summary ─────────────────────
+cat("\n--- Influential Observations ---\n")
+n_high_lev  <- sum(leverage  > lev_thresh)
+n_high_cook <- sum(cooks_d   > cook_thresh)
+n_high_stu  <- sum(abs(stu_res) > 3)
+
+cat(sprintf("  High leverage  (h > 2p/n = %.4f): %d obs\n", lev_thresh,  n_high_lev))
+cat(sprintf("  Large Cook's D (D > 4/n  = %.4f): %d obs\n", cook_thresh, n_high_cook))
+cat(sprintf("  |Ext. stud. res.| > 3            : %d obs\n",              n_high_stu))
+
+# Combined flag: obs that fail at least 2 of the 3 criteria
+influence_flag <- (leverage > lev_thresh) +
+                  (cooks_d  > cook_thresh) +
+                  (abs(stu_res) > 3)
+n_combined <- sum(influence_flag >= 2)
+cat(sprintf("  Flagged on ≥2 criteria (combined): %d obs\n", n_combined))
+
+# ── 3f. Robust standard errors (HC3) ─────────────────────────
+cat("\n--- Coefficient Stability: Robust (HC3) vs WLS SEs ---\n")
+robust_se <- coeftest(wls_final, vcov = vcovHC(wls_final, type = "HC3"))
+se_compare <- data.frame(
+  WLS_SE    = summary(wls_final)$coefficients[, "Std. Error"],
+  Robust_SE = robust_se[, "Std. Error"],
+  SE_ratio  = robust_se[, "Std. Error"] / summary(wls_final)$coefficients[, "Std. Error"]
+)
+print(round(se_compare, 5))
+
+# ============================================================
+# 4. WEIGHT SPECIFICATION CHECK
+# ============================================================
+cat("\n--- Weight Specification Check ---\n")
+# Regress squared raw residuals on fitted values:
+# if weights are correctly specified the slope should be ~flat
+wt_check <- lm(raw_res^2 ~ fitted_vals)
+cat(sprintf("  R² of |raw_res|² ~ fitted: %.4f\n", summary(wt_check)$r.squared))
+cat("  (Near 0 → weight specification reasonable)\n")
+
+# ============================================================
+# 5. SUMMARY TABLE
+# ============================================================
+cat("\n========================================================\n")
+cat("  QUICK-REFERENCE SUMMARY\n")
+cat("========================================================\n")
+checks <- data.frame(
+  Check          = c("Normality (SW)", "Normality (AD)",
+                     "Heteroscedasticity (BP-WLS)",
+                     "High-leverage obs", "High Cook's D obs",
+                     "Outliers |stu_res|>3"),
+  Result         = c(sprintf("p=%.3e", sw$p.value),
+                     sprintf("p=%.3e", ad$p.value),
+                     sprintf("p=%.3e", bp_wtd$p.value),
+                     as.character(n_high_lev),
+                     as.character(n_high_cook),
+                     as.character(n_high_stu)),
+  Flag           = c(ifelse(sw$p.value  < 0.05, "⚠", "✓"),
+                     ifelse(ad$p.value  < 0.05, "⚠", "✓"),
+                     ifelse(bp_wtd$p.value < 0.05, "⚠", "✓"),
+                     ifelse(n_high_lev  > 0,   "⚠", "✓"),
+                     ifelse(n_high_cook > 0,   "⚠", "✓"),
+                     ifelse(n_high_stu  > 0,   "⚠", "✓"))
+)
+print(checks, row.names = FALSE)
+```
+**Good Things**\
+1. Linearity & mean-zero residuals — The loess lines in both Weighted Residuals vs Fitted and all 11 predictor plots are essentially flat and hugging zero. The quadratic terms and interaction are doing their job. No missed curvature of concern.\
+
+2. Weight specification — R² = 0.0001 for |raw_res|² ~ fitted is about as close to zero .The weights are correctly specified and are genuinely absorbing heteroscedasticity in the right places.\
+
+3. Weights vs Raw Residuals — High-weight observations tightly cluster near zero as expected. The spread fans out only at low weights, which is exactly the intended behavior of WLS.\
+
+4. Multicollinearity — No VIF > 10, despite having quadratic terms for several predictors. The centering (the C suffix variables) is working well here.\
+
+5. Coefficient stability — All SE ratios are between 0.99 and 1.24 except for two. This means our WLS standard errors are reliable for nearly every coefficient, and inference is trustworthy across the board.\
+
+6. Influential observations — 309 Cook's D flags sounds alarming but at n=6,075 with cutoff 4/n=0.0007, that threshold is extremely conservative. The two visually extreme spikes (~0.10 and ~0.025) are worth inspecting but not a crisis.\
+
+7. Factor levels — Month and elevation class boxplots are well-centered on zero with symmetric spreads. The model is handling both grouping variables without systematic bias across levels.\
+
+** Bad Thing: **\
+1. Non-normality of residuals (SW p = 7.5e-11, AD p = 1.2e-9): The Q-Q plot tells the real story: the bulk of the distribution is well-behaved (the middle is tight to the line), but you have heavy tails.With n ≈ 6,075, our point estimates and standard errors are fine by CLT. What's affected is prediction intervals — they'll be too narrow at the extremes.\
+
+
+
+## Model Validation
+```{r fig.cap="Test-set actual vs. predicted bias (wls_final). Red dashed line is 1:1 reference."}
+
+testC <- center_with(test_raw, mu_train)
+bias_pred_test   <- predict(wls_final, newdata = testC)
+bias_actual_test <- testC$bias
+resid_val        <- bias_actual_test - bias_pred_test
+
+n_test   <- nrow(testC)
+MSPR_val <- mean(resid_val^2)
+RMSE_test <- sqrt(MSPR_val)
+MAE_val   <- mean(abs(resid_val))
+MBE_val   <- mean(resid_val)
+SS_res    <- sum(resid_val^2)
+SS_tot    <- sum((bias_actual_test - mean(bias_actual_test))^2)
+R2_val    <- 1 - SS_res / SS_tot
+
+# ── Train RMSE (direct, not RSE — uses n not df) ─────────────
+# RSE = 1.936 uses df = n-p; RMSE_train uses n → slightly smaller
+resid_train <- residuals(wls_final, type = "response")
+RMSE_train  <- sqrt(mean(resid_train^2))
+RSE_train   <- sigma(wls_final)          # = 1.936, for reference
+
+cat("==========================================================\n")
+cat("   VALIDATION METRICS — wls_final (test set)\n")
+cat("==========================================================\n")
+cat(sprintf("  R²         = %.4f\n",     R2_val))
+cat(sprintf("  MSPR       = %.4f °C²\n", MSPR_val))
+cat(sprintf("  RMSE(test) = %.4f °C\n",  RMSE_test))
+cat(sprintf("  MAE        = %.4f °C\n",  MAE_val))
+cat(sprintf("  MBE        = %.4f °C\n",  MBE_val))
+cat("----------------------------------------------------------\n")
+cat("   GENERALISATION CHECK\n")
+cat("----------------------------------------------------------\n")
+cat(sprintf("  RSE  (train, df-adjusted) = %.4f °C\n", RSE_train))
+cat(sprintf("  RMSE (train, n-based)     = %.4f °C\n", RMSE_train))
+cat(sprintf("  RMSE (test)               = %.4f °C\n", RMSE_test))
+cat(sprintf("  Difference (test - train) = %+.4f °C  (%+.1f%%)\n",
+            RMSE_test - RMSE_train,
+            100 * (RMSE_test - RMSE_train) / RMSE_train))
+if (abs(RMSE_test - RMSE_train) / RMSE_train < 0.05) {
+  cat("  ✓ Within 5% — model generalises well.\n")
+} else {
+  cat("  ⚠ Gap > 5% — possible overfitting.\n")
+}
+
+val_df <- data.frame(pred = bias_pred_test, actual = bias_actual_test)
+
+p_scatter <- ggplot(val_df, aes(x = pred, y = actual)) +
+  geom_point(alpha = 0.15, size = 0.8, color = "#378ADD") +
+  geom_abline(slope = 1, intercept = 0,
+              color = "red", lty = 2, linewidth = 1) +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "black", linewidth = 0.9) +
+  labs(
+    title    = "Test Set: Actual vs. Predicted Bias (wls_final)",
+    subtitle = sprintf(
+      "R² = %.3f | RMSE (train)= %.3f °C  |  RMSE (test)= %.3f °C",
+      R2_val, RMSE_train, RMSE_test
+    ),
+    x = "Predicted Bias (°C)", y = "Actual Bias (°C)"
+  ) +
+  theme_bw()
+p_scatter
+```
+**Interpretation:** Perfectly suitable for predicting LDAPS bias.
+
+# LDAPS Model improvement
+```{r Corrected Model}
+mu_train2 <- data %>% summarise(
+    mu_PTmax   = mean(Present_Tmax),
+    mu_PPT_avg = mean(LDAPS_PPT_avg),
+    mu_solar   = mean(Solar_rad),
+    mu_RHmin   = mean(LDAPS_RHmin),
+    mu_slope   = mean(Slope),
+    mu_LH      = mean(LDAPS_LH),
+    mu_PTmin   = mean(Present_Tmin),
+    mu_CC_avg  = mean(LDAPS_CC_avg),
+    mu_RHmax   = mean(LDAPS_RHmax))
+dataC = center_with(data, mu_train2)
+bias_pred_test   <- predict(wls_final, newdata = dataC)
+
+dataC <- dataC %>%
+  mutate(
+    Predicted_bias       = bias_pred_test,
+    Corrected_LDAPS_Tmax = LDAPS_Tmax + Predicted_bias
+  )
+cat("Summary of corrected vs. raw LDAPS Tmax (test set, first 12 rows):\n")
+dataC %>%
+  dplyr::select(station, Date, Next_Tmax, Corrected_LDAPS_Tmax, LDAPS_Tmax, Predicted_bias) %>%
+  head(3)%>%
+  kable(digits = 3, caption = "Raw vs. corrected LDAPS Tmax forecast (test set)")
+
+clm1 <- lm(Next_Tmax~Corrected_LDAPS_Tmax, data=dataC)
+summary(clm1)
+sqrt(mean(clm1$residuals^2))
+mean(dataC$Next_Tmax - dataC$Corrected_LDAPS_Tmax)
+
+p_clm1 <- ggplot(dataC, aes(x = Corrected_LDAPS_Tmax, y = Next_Tmax)) +
+  geom_point(alpha = 0.1, size = 0.8) +
+  geom_smooth(aes(x = LDAPS_Tmax, y = Next_Tmax), method = "lm", se = TRUE,
+              color = "blue", linewidth = 1, inherit.aes = FALSE) +
+  geom_abline(slope = 1, intercept = 0, color = "red", lty = 2, linewidth = 0.5) +
+  labs(title    = "Corrected_LDAPS forecast v/s Actual maximum temperature",
+       subtitle = "Red = perfect forecast;  Blue = OLS fit",
+       x = "LDAPS_forcasted Maximum Temperatures",
+       y = "Actual Maximum Temperatures") +
+  annotate("text",
+           x = 37, y = 32,
+           label = paste0("E(Bias) = ", round(mean(dataC$Next_Tmax - dataC$Corrected_LDAPS_Tmax), 2), " °C"),
+           hjust = 1, color = "black", size = 2.5) +
+  annotate("text",
+           x = 37, y = 31,
+           label = paste0("R2 = ", 0.77),
+           hjust = 1, color = "black", size = 2.5) +
+  annotate("text",
+           x = 37, y = 30,
+           label = paste0("RMSE = ", 1.50),
+           hjust = 1, color = "black", size = 2.5) +
+  
+  theme_bw()
+p_clm1
+```
+
+
+# Comparison
+```{r comparison}
+pred_ulm1  <- predict(ulm1)
+resid_ulm1 <- data$Next_Tmax - pred_ulm1
+EB_ulm1 <- mean(data$bias)
+R2_ulm1   <- summary(ulm1)$r.squared
+RMSE_ulm1 <- sqrt(mean(resid_ulm1^2))
+
+pred_clm1  <- predict(clm1)
+resid_clm1 <- dataC$Next_Tmax - pred_clm1
+EB_clm1 <- mean(dataC$Next_Tmax - dataC$Corrected_LDAPS_Tmax)
+R2_clm1   <- summary(clm1)$r.squared
+RMSE_clm1 <- sqrt(mean(resid_clm1^2))
+
+comp_final <- data.frame(
+  Model = c(
+    "A: Next_Tmax ~ LDAPS_Tmax (uncorrected)",
+    "B: Next_Tmax ~ Corrected_LDAPS_Tmax (bias-corrected)" ),
+  Expected_Bias = c(round(EB_ulm1,   4), round(EB_clm1,   4)),
+  R2            = c(round(R2_ulm1,   4), round(R2_clm1,   4)),
+  RMSE          = c(round(RMSE_ulm1, 4), round(RMSE_clm1, 4)))
+names(comp_final) <- c("Model", "Expected Bias (°C)", "R2", "RMSE (°C)")
+kable(comp_final,
+      caption = "Performance comparison: uncorrected vs. bias-corrected LDAPS (test set). ")
+
+p_ulm1
+p_clm1
+
+hist(data$bias)
+hist(dataC$Next_Tmax - dataC$Corrected_LDAPS_Tmax)
+
+summary(data$bias)
+summary(dataC$Next_Tmax - dataC$Corrected_LDAPS_Tmax)
+
+boxplot(data$bias)
+boxplot(dataC$Next_Tmax - dataC$Corrected_LDAPS_Tmax)
+```
+
+
+
