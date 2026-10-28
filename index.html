@@ -859,6 +859,15 @@ a:hover{color:var(--accent);}
 .project-links{display:flex;flex-wrap:wrap;gap:.7rem;margin-top:var(--sp-6);}
 .project-note{font-size:.84rem;color:var(--muted);line-height:1.6;margin-top:var(--sp-5);}
 @media(min-width:700px){.project-results{grid-template-columns:repeat(3,minmax(0,1fr));}}
+
+.project-files{position:relative;}
+.project-files>summary{list-style:none;cursor:pointer;}
+.project-files>summary::-webkit-details-marker{display:none;}
+.project-file-list{position:absolute;z-index:5;top:calc(100% + .65rem);left:0;min-width:min(26rem,calc(100vw - 3rem));margin:0;padding:.5rem;list-style:none;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-md);box-shadow:var(--shadow);}
+.project-file-list li+li{border-top:1px solid var(--line);}
+.project-file-list a{display:grid;gap:.18rem;padding:.7rem .8rem;color:var(--ink);text-decoration:none;border-radius:var(--radius-sm);font-family:var(--font-mono);font-size:.82rem;}
+.project-file-list a:hover{background:var(--surface-2);color:var(--data);}
+.project-file-list span{font-family:var(--font-body);font-size:.76rem;color:var(--muted);}
 </style>
 
 <a class="skip-link" href="#main-content">Skip to content</a>
@@ -1247,14 +1256,24 @@ a:hover{color:var(--accent);}
     </div>
     <div class="project-grid">
       <article class="project-card">
-        <div class="project-topline"><span class="project-kicker">Project 01 · Completed · October 2026</span><span class="badge badge-good">Completed</span></div>
+        <div class="project-topline"><span class="project-kicker">Project 01 · Fall 2025</span><span class="badge badge-good">Completed</span></div>
         <h3>Quantifying the Influence of Socioeconomic and Public Health Predictors on Life Expectancy</h3>
         <p class="project-description">This study examines how socioeconomic conditions and public health burdens relate to life expectancy across 183 countries in 2015. Multiple linear regression was used to estimate the independent associations of candidate predictors, assess multicollinearity, and select a more parsimonious model through backward stepwise regression.</p>
         <div class="project-method" aria-label="Project methods and themes"><span class="chip">Multiple linear regression</span><span class="chip">Exploratory data analysis</span><span class="chip">Multicollinearity diagnostics</span><span class="chip">Backward stepwise selection</span><span class="chip">R</span></div>
         <div class="project-results" aria-label="Key project results"><div class="project-result"><strong>183</strong><span>countries observed in 2015</span></div><div class="project-result"><strong>0.8715</strong><span>adjusted R² for the final model</span></div><div class="project-result"><strong>7</strong><span>predictors retained in the final model</span></div></div>
         <ul class="project-findings"><li>Average years of schooling had the strongest positive association in the final model: about 0.70 additional years of life expectancy per additional year of schooling, holding the other model variables constant.</li><li>Adult mortality, HIV death rate, early-childhood thinness, polio immunization deficit, and developing-country status were negatively associated with life expectancy; log GDP per capita was positively associated.</li><li>The final model retained schooling, log GDP per capita, adult mortality, log HIV death rate, log early-childhood thinness, log polio immunization deficit, and country status.</li></ul>
         <p class="project-note">The findings describe adjusted associations in cross-sectional country-level data; they should not be interpreted as causal effects.</p>
-        <div class="project-links"><a class="btn btn-primary" href="LE_Project.pdf" target="_blank" rel="noopener">Read the project report</a><a class="btn btn-ghost" href="Scratch%20Paper.R" download>Scratch Paper.R</a><a class="btn btn-ghost" href="LE%20project2.R" download>LE project2.R</a></div>
+        <div class="project-links">
+          <details class="project-files">
+            <summary class="btn btn-primary">Data &amp; Scripts</summary>
+            <ul class="project-file-list">
+              <li><a href="Life%20Expectancy%20Data.xlsx" download>Life Expectancy Data.xlsx <span>Project dataset</span></a></li>
+              <li><a href="Scratch%20Paper.R" download>Scratch Paper.R <span>Exploratory analysis and transformations</span></a></li>
+              <li><a href="LE%20project2.R" download>LE project2.R <span>Regression model development</span></a></li>
+              <li><a href="LE_Project.pdf" target="_blank" rel="noopener">LE_Project.pdf <span>Full project report</span></a></li>
+            </ul>
+          </details>
+        </div>
       </article>
     </div>
   </div>
