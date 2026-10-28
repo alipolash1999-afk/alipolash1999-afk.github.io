@@ -1252,7 +1252,7 @@ a:hover{color:var(--accent);}
     <div class="section-head">
       <p class="eyebrow">Research Projects</p>
       <h2 class="h2">From question to evidence</h2>
-      <p class="lead">Completed and ongoing applied research, with project summaries and supporting materials.</p>
+      <p class="lead">Applied research projects, with summaries and supporting materials.</p>
     </div>
     <div class="project-grid">
       <article class="project-card">
@@ -1270,9 +1270,30 @@ a:hover{color:var(--accent);}
               <li><a href="Life%20Expectancy%20Data.xlsx" download>Life Expectancy Data.xlsx <span>Project dataset</span></a></li>
               <li><a href="Scratch%20Paper.R" download>Scratch Paper.R <span>Exploratory analysis and transformations</span></a></li>
               <li><a href="LE%20project2.R" download>LE project2.R <span>Regression model development</span></a></li>
-              
             </ul>
-          </details>          <a class="btn btn-ghost" href="LE_Project.pdf" target="_blank" rel="noopener">Project Report</a>
+          </details>
+          <a class="btn btn-secondary" href="LE_Project.pdf" target="_blank" rel="noopener">Project Report</a>
+        </div>
+      </article>
+      <article class="project-card">
+        <div class="project-topline"><span class="project-kicker">Project 02 · Spring 2026 · STA 6167</span></div>
+        <h3>Regression-Based Bias Correction of Seoul’s LDAPS Temperature Forecasts</h3>
+        <p class="project-description">This project evaluates whether regression-based post-processing can correct next-day maximum temperature forecasts from the LDAPS numerical weather prediction model. Using summer observations from 25 Seoul weather stations across 2013–2017, the analysis models forecast error as observed temperature minus the raw forecast, then applies the estimated correction to the forecast.</p>
+        <div class="project-method" aria-label="Project methods and themes"><span class="chip">Exploratory data analysis</span><span class="chip">AIC stepwise selection</span><span class="chip">Weighted least squares</span><span class="chip">Bias correction</span><span class="chip">R</span></div>
+        <div class="project-results" aria-label="Key project results"><div class="project-result"><strong>+0.621°C</strong><span>mean raw forecast bias (cold)</span></div><div class="project-result"><strong>1.709 → 1.504°C</strong><span>RMSE before and after correction</span></div><div class="project-result"><strong>0.698 → 0.766</strong><span>R² before and after correction</span></div></div>
+        <ul class="project-findings"><li>The final weighted regression model used 27 parameters to estimate forecast bias; its test-set bias-prediction RMSE was 1.516°C.</li><li>Across the full study sample, bias correction reduced the mean forecast error from +0.621°C to −0.033°C and reduced RMSE by about 12%.</li><li>The analysis is limited to Seoul summers. Its random train/test split includes the same stations and study years on both sides, and residual diagnostics indicate some nonlinearity remains.</li></ul>
+        <p class="project-note">Results are observational and describe forecast performance in this dataset; they do not establish performance for other regions or seasons.</p>
+        <div class="project-links">
+          <details class="project-files">
+            <summary class="btn btn-primary">Data &amp; Scripts</summary>
+            <ul class="project-file-list">
+              <li><a href="temp.csv" download>temp.csv <span>Analysis dataset</span></a></li>
+              <li><a href="Final%20Rcodes.Rmd" download>Final Rcodes.Rmd <span>Reproducible analysis and model development</span></a></li>
+            </ul>
+          </details>
+          <a class="btn btn-secondary" href="STA6167_Final_project%20(1).pdf" target="_blank" rel="noopener">Project Report</a>
+          <a class="btn btn-secondary" href="Final%20Presentation%20ALI.pdf" target="_blank" rel="noopener">Presentation</a>
+          <a class="btn btn-secondary" href="Project%20Video.mp4" target="_blank" rel="noopener">Project Video</a>
         </div>
       </article>
     </div>
